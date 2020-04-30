@@ -1,3 +1,25 @@
+<#
+    .SYNOPSIS
+    Exports Active Directory Certificate Services Configuration Data from Active Directory
+    Run this once on a Domain Controller (or any other 8.0/2012+ Machine) with AD Powershell Module installed
+
+    .PARAMETER DumpCA
+    Tries to connect to each Certification Authority that is found in Active Directory and collects config data.
+    You need Network connectivitiy and "Read" Permission on each CA to use this.
+
+    .PARAMETER DsConfigDn
+    Manually specifies the Directory Service Configuration DN. Used if the Script is ran across a forest trust.
+    In most cases, this Parameter is not required.
+
+    .PARAMETER Path
+    Path for the Configuration dump. If not specified, the Path of the Script File is used.
+
+   .Notes
+    AUTHOR: Uwe Gradenegger
+
+    #Requires -Version 3.0
+
+#>
 [cmdletbinding()]
 param (
     [Parameter(Mandatory=$False)]
@@ -6,12 +28,41 @@ param (
 
     [Parameter(Mandatory=$False)]
     [String]
-    $Path = $(Split-Path -Path $MyInvocation.MyCommand.Definition -Parent)
+    $Path = $(Split-Path -Path $MyInvocation.MyCommand.Definition -Parent),
+
+    [Parameter(Mandatory=$False)]
+    [String]
+    $DsConfigDn = $null
 )
 
-# Run this once on a Domain Controller (or any other 8.0/2012+ Machine) with AD Powershell Module installed
-Import-Module ActiveDirectory
-$DsConfigDN = "CN=Configuration,$($(Get-ADForest | Select-Object -ExpandProperty RootDomain | Get-ADDomain).DistinguishedName)"
+<#
+To Do:
+- Implement Support for Client Operating Systems (RSAT is detected differently)
+- Improve Error Handling
+- Detection for local CA Installation/to merge both Scripts into one File
+- Put ADCS Connectivity Test in a meaningful Function
+- Merge AIA and Certification Authorities Dump
+- Dump ACLs as these seem not to be exported with certutil -ds in Windows 2012
+#>
+
+#region Test-Prerequisites
+
+# Ensuring the Script will be run on a supported Operating System
+$OS = Get-WmiObject -Class Win32_OperatingSystem
+If (($OS.name -notmatch "Server") -or ([int32]$OS.BuildNumber -lt 9200)) {
+    Write-Warning -Message "This Script must be run on Windows Server 2012 or newer! Aborting."
+    return 
+}
+
+# Ensuring we have required AD PowerShell Modules installed
+If ((Get-WindowsFeature RSAT-AD-PowerShell).Installed -ne $True) {
+    Write-Warning -Message "This Script requires AD PowerShell Modules (RSAT-AD-PowerShell) to be installed! Aborting."
+    return 
+}
+
+#endregion Test-Prerequisites
+
+#region Functions
 
 Function Remove-InvalidFileNameChars {
 
@@ -27,12 +78,25 @@ Function Remove-InvalidFileNameChars {
     return ($Name -replace $re)
 }
 
+#endregion Functions
+
+#region Preparations
+
+Import-Module ActiveDirectory
+If ($null -eq $DsConfigDn) {
+    $DsConfigDn = "CN=Configuration,$($(Get-ADForest | Select-Object -ExpandProperty RootDomain | Get-ADDomain).DistinguishedName)"
+}
+
 [void](New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop)
+
+#endregion Preparations
+
+#region Dump-AIA
 
 $CurrentDirectory = "$Path\AIA"
 [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
 
-Get-ChildItem "AD:CN=AIA,CN=Public Key Services,CN=Services,$DsConfigDN" | Foreach-Object -Process {
+Get-ChildItem "AD:CN=AIA,CN=Public Key Services,CN=Services,$DsConfigDn" | Foreach-Object -Process {
 
     $ObjectName = $_.Name
     $ObjectDn = $_.DistinguishedName
@@ -45,23 +109,29 @@ Get-ChildItem "AD:CN=AIA,CN=Public Key Services,CN=Services,$DsConfigDN" | Forea
     $(Get-ADObject $_ -Properties cACertificate).cACertificate | Foreach-Object {
         $FileName = "$CurrentDirectory\$($ObjectName)_cACertificate_($($i))"
         # CRT Files are usually blocked by E-Mail Anti-Virus, thus only exporting in BASE64 Encoding to Text Files
-        Set-Content -value "-----BEGIN CERTIFICATE-----`n$([Convert]::ToBase64String($_))`n-----END CERTIFICATE-----" -Encoding UTF8 -path "$($FileName)_BASE64.txt" -Force
+        Set-Content `
+            -Value "-----BEGIN CERTIFICATE-----`n$([Convert]::ToBase64String($_))`n-----END CERTIFICATE-----" `
+            -Encoding UTF8 `
+            -Path "$($FileName)_BASE64.txt" `
+            -Force
         certutil -dump "$($FileName)_BASE64.txt" > "$($FileName)_BASE64_dump.txt"
         $i++
     }
 
 }
 
-Get-ChildItem "AD:CN=CDP,CN=Public Key Services,CN=Services,$DsConfigDN" | Foreach-Object -Process {
+#endregion Dump-AIA
+
+#region Dump-CDP
+
+Get-ChildItem "AD:CN=CDP,CN=Public Key Services,CN=Services,$DsConfigDn" | Foreach-Object -Process {
 
     $ObjectName = $_.Name
 
-    # Not elegant, should rethink this
     $CurrentDirectory = "$Path\CDP\$($ObjectName)"
     [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
 
     # Enumerate Sub Directories
-
     Get-ChildItem "AD:$($_.DistinguishedName)" | Foreach-Object -Process {
 
         $ObjectName = $_.Name
@@ -74,24 +144,37 @@ Get-ChildItem "AD:CN=CDP,CN=Public Key Services,CN=Services,$DsConfigDN" | Forea
         $Crl = $(Get-ADObject $_ -Properties certificateRevocationList).certificateRevocationList
         If ($Crl.Length -gt 1) {
             $FileName = "$CurrentDirectory\$($ObjectName)_certificateRevocationList"
-            Set-Content -value $Crl -Encoding Byte -path "$($FileName).crl" -Force -ErrorAction SilentlyContinue
+            Set-Content `
+                -Value $Crl `
+                -Encoding Byte `
+                -Path "$($FileName).crl" `
+                -Force `
+                -ErrorAction SilentlyContinue
         }
         
         $DeltaCrl = $(Get-ADObject $_ -Properties deltaRevocationList).deltaRevocationList
         If ($DeltaCrl.Length -gt 1) {
             $FileName = "$CurrentDirectory\$($ObjectName)_deltaRevocationList"
-            Set-Content -value $DeltaCrl -Encoding Byte -path "$($FileName)+.crl" -Force -ErrorAction SilentlyContinue
+            Set-Content `
+                -Value $DeltaCrl `
+                -Encoding Byte `
+                -Path "$($FileName)+.crl" `
+                -Force `
+                -ErrorAction SilentlyContinue
         }
 
     }
 
 }
 
+#endregion Dump-CDP
+
+# region Dump-CertificateTemplates
 
 $CurrentDirectory = "$Path\Certificate Templates"
 [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
 
-Get-ChildItem "AD:CN=Certificate Templates,CN=Public Key Services,CN=Services,$DsConfigDN" | Foreach-Object -Process {
+Get-ChildItem "AD:CN=Certificate Templates,CN=Public Key Services,CN=Services,$DsConfigDn" | Foreach-Object -Process {
 
     $ObjectName = $_.Name
     $ObjectDn = $_.DistinguishedName
@@ -102,12 +185,14 @@ Get-ChildItem "AD:CN=Certificate Templates,CN=Public Key Services,CN=Services,$D
 
 }
 
-# Exactly the same as AIA above, should pack it into a function
+# region Dump-CertificateTemplates
+
+#region Dump-CertificationAuthorities
 
 $CurrentDirectory = "$Path\Certification Authorities"
 [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
 
-Get-ChildItem "AD:CN=Certification Authorities,CN=Public Key Services,CN=Services,$DsConfigDN" | Foreach-Object -Process {
+Get-ChildItem "AD:CN=Certification Authorities,CN=Public Key Services,CN=Services,$DsConfigDn" | Foreach-Object -Process {
 
     $ObjectName = $_.Name
     $ObjectDn = $_.DistinguishedName
@@ -120,20 +205,25 @@ Get-ChildItem "AD:CN=Certification Authorities,CN=Public Key Services,CN=Service
     $(Get-ADObject $_ -Properties cACertificate).cACertificate | Foreach-Object {
         $FileName = "$CurrentDirectory\$($ObjectName)_cACertificate_($($i))"
         # CRT Files are usually blocked by E-Mail Anti-Virus, thus only exporting in BASE64 Encoding to Text Files
-        #Set-Content -value $_ -Encoding Byte -path "$($FileName).crt" -Force
-        Set-Content -value "-----BEGIN CERTIFICATE-----`n$([Convert]::ToBase64String($_))`n-----END CERTIFICATE-----" -Encoding UTF8 -path "$($FileName)_BASE64.txt" -Force
+        Set-Content `
+            -Value "-----BEGIN CERTIFICATE-----`n$([Convert]::ToBase64String($_))`n-----END CERTIFICATE-----" `
+            -Encoding UTF8 `
+            -Path "$($FileName)_BASE64.txt" `
+            -Force
         certutil -dump "$($FileName)_BASE64.txt" > "$($FileName)_BASE64_dump.txt"
         $i++
     }
 
 }
 
+#endregion Dump-CertificationAuthorities
 
+#region Dump-EnrollmentServices
 
 $CurrentDirectory = "$Path\Enrollment Services"
 [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
 
-Get-ChildItem "AD:CN=Enrollment Services,CN=Public Key Services,CN=Services,$DsConfigDN" | Foreach-Object -Process {
+Get-ChildItem "AD:CN=Enrollment Services,CN=Public Key Services,CN=Services,$DsConfigDn" | Foreach-Object -Process {
 
     $ObjectName = $_.Name
     $ObjectDn = $_.DistinguishedName
@@ -146,10 +236,9 @@ Get-ChildItem "AD:CN=Enrollment Services,CN=Public Key Services,CN=Services,$DsC
     $DnsHostName = $(Get-ADObject $_ -Properties dNSHostName).dNSHostName
 
     # Dumping which Certificate Templates are bound to each CA
-    (Get-ADObject $_ -Properties certificateTemplates).certificateTemplates | Out-File -FilePath "$CurrentDirectory\$($ObjectName)_CATemplates.txt" -Encoding String -Force
+    (Get-ADObject $_ -Properties certificateTemplates).certificateTemplates |
+        Out-File -FilePath "$CurrentDirectory\$($ObjectName)_CATemplates.txt" -Encoding String -Force
 
-
-    # Requires Remote Connectivity and "read" Permission on CA
     If ($DumpCA) {
 
         Write-Verbose -Message "Dumping Configuration from $ObjectName ($DnsHostName)"
@@ -163,6 +252,7 @@ Get-ChildItem "AD:CN=Enrollment Services,CN=Public Key Services,CN=Services,$DsC
         }
         Catch {
             Write-Warning -Message "Cannot connect to $ObjectName ($DnsHostName)"
+            Write-Warning -Message "Configuration therefore not exported. Do this manually directly on the CA."
             $CaIsOnline = $False
         }
 
@@ -186,12 +276,14 @@ Get-ChildItem "AD:CN=Enrollment Services,CN=Public Key Services,CN=Services,$DsC
 
 }
 
+#endregion Dump-EnrollmentServices
 
+#region Dump-AIA
 
 $CurrentDirectory = "$Path\KRA"
 [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
 
-Get-ChildItem "AD:CN=KRA,CN=Public Key Services,CN=Services,$DsConfigDN" | Foreach-Object -Process {
+Get-ChildItem "AD:CN=KRA,CN=Public Key Services,CN=Services,$DsConfigDn" | Foreach-Object -Process {
 
     $ObjectName = $_.Name
     $ObjectDn = $_.DistinguishedName
@@ -202,12 +294,14 @@ Get-ChildItem "AD:CN=KRA,CN=Public Key Services,CN=Services,$DsConfigDN" | Forea
 
 }
 
+#endregion Dump-AIA
 
+#region Dump-OID
 
 $CurrentDirectory = "$Path\OID"
 [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
 
-Get-ChildItem "AD:CN=OID,CN=Public Key Services,CN=Services,$DsConfigDN" | Foreach-Object -Process {
+Get-ChildItem "AD:CN=OID,CN=Public Key Services,CN=Services,$DsConfigDn" | Foreach-Object -Process {
 
     $ObjectName = $_.Name
     $ObjectDn = $_.DistinguishedName
@@ -217,3 +311,5 @@ Get-ChildItem "AD:CN=OID,CN=Public Key Services,CN=Services,$DsConfigDN" | Forea
     certutil -v -ds $ObjectDn > "$CurrentDirectory\msPKI-Enterprise-Oid_$($ObjectName).txt"
 
 }
+
+#endregion Dump-OID
