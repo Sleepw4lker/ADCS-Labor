@@ -32,35 +32,17 @@ param (
 
     [Parameter(Mandatory=$False)]
     [String]
-    $DsConfigDn = $null
+    $DsConfigDn = ""
 )
 
 <#
 To Do:
 - Implement Support for Client Operating Systems (RSAT is detected differently)
 - Improve Error Handling
-- Detection for local CA Installation/to merge both Scripts into one File
 - Put ADCS Connectivity Test in a meaningful Function
 - Merge AIA and Certification Authorities Dump
-- Dump ACLs as these seem not to be exported with certutil -ds in Windows 2012
+- Dump CrossCA Certificates
 #>
-
-#region Test-Prerequisites
-
-# Ensuring the Script will be run on a supported Operating System
-$OS = Get-WmiObject -Class Win32_OperatingSystem
-If (($OS.name -notmatch "Server") -or ([int32]$OS.BuildNumber -lt 9200)) {
-    Write-Warning -Message "This Script must be run on Windows Server 2012 or newer! Aborting."
-    return 
-}
-
-# Ensuring we have required AD PowerShell Modules installed
-If ((Get-WindowsFeature RSAT-AD-PowerShell).Installed -ne $True) {
-    Write-Warning -Message "This Script requires AD PowerShell Modules (RSAT-AD-PowerShell) to be installed! Aborting."
-    return 
-}
-
-#endregion Test-Prerequisites
 
 #region Functions
 
@@ -73,40 +55,171 @@ Function Remove-InvalidFileNameChars {
         [String]$Name
     )
 
-    $invalidChars = [IO.Path]::GetInvalidFileNameChars() -join ''
-    $re = "[{0}]" -f [RegEx]::Escape($invalidChars)
-    return ($Name -replace $re)
+    process {
+
+        $invalidChars = [IO.Path]::GetInvalidFileNameChars() -join ''
+        $re = "[{0}]" -f [RegEx]::Escape($invalidChars)
+        return ($Name -replace $re)
+
+    }
+}
+
+Function Export-CaInformation {
+
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$False)]
+        [ValidateNotNullOrEmpty()]
+        [String]$HostName = "localhost",
+
+        [Parameter(Mandatory=$True)]
+        [ValidateNotNullOrEmpty()]
+        [String]$CaName,
+
+        [Parameter(Mandatory=$True)]
+        [ValidateNotNullOrEmpty()]
+        [String]$Path
+    )
+
+    process {
+
+        $Now = $((Get-Date).ToString($(Get-culture).DateTimeFormat.ShortDatePattern))
+        $DbFields = "RequestID,SerialNumber,RequesterName,CommonName,CertificateTemplate,NotBefore,NotAfter"
+
+        Write-Verbose -Message "Dumping CA Configuration from $CaName ($HostName)"
+
+        # TestICertAdmin Connectivity first to speed up process, throw error on fail
+        $CertAdmin = New-Object -ComObject CertificateAuthority.Admin.1
+
+        Try {
+            [void]($CertAdmin.GetCAProperty("$HostName\$CaName",0x6,0,4,0))
+        }
+        Catch {
+            Write-Warning -Message "Cannot connect to $CaName ($HostName)"
+            Write-Warning -Message "Configuration therefore not exported. Do this manually directly on the CA."
+            return
+        }
+
+        # Dumping CA Configuration
+        certutil -config "$HostName\$CaName" -v -getreg CA > "$Path\$($CaName)_getreg_CA.txt"
+        certutil -config "$HostName\$CaName" -v -getreg CA\CSP > "$Path\$($CaName)_getreg_CA_CSP.txt"
+        certutil -config "$HostName\$CaName" -v -getreg Policy > "$Path\$($CaName)_getreg_Policy.txt"
+        certutil -config "$HostName\$CaName" -v -cainfo > "$Path\$($CaName)_cainfo.txt"
+        certutil -config "$HostName\$CaName" -view -restrict "Disposition=20,NotAfter>=$Now" -out $DbFields csv > "$Path\$($CaName)_ValidCertificates.csv"
+        certutil -config "$HostName\$CaName" -view -restrict "Disposition=30" -out $DbFields csv > "$Path\$($CaName)_FailedRequests.csv"
+        certutil -config "$HostName\$CaName" -view -restrict "Disposition=31" -out $DbFields csv > "$Path\$($CaName)_DeniedRequests.csv"
+
+        Copy-Item `
+            -Path "$($env:SystemRoot)\capolicy.inf" `
+            -Destination "$Path\$($CaName)_capolicy.inf" `
+            -ErrorAction SilentlyContinue
+
+        # Exporting the Windows Event Log will in most cases work only locally
+        If ($HostName -eq "localhost") {
+
+            $Limit = (Get-Date).AddDays(-90)
+            $EventSources = "Microsoft-Windows-CertificationAuthority","ESENT"
+
+            Get-EventLog `
+                -LogName Application `
+                -Source $EventSources `
+                -After $Limit `
+                -ErrorAction SilentlyContinue | 
+                Select-Object -Property EntryType, TimeGenerated, Source, EventID | 
+                    Export-CSV "$Path\$($CaName)_EventLog-Overview.csv" -NoTypeInfo
+
+            [void](Get-WmiObject -Class Win32_NTEventlogFile | 
+                Where-Object LogfileName -EQ 'Application').BackupEventlog("$Path\$($CaName)_EventLog.evtx")
+        }
+
+    }
 }
 
 #endregion Functions
 
-#region Preparations
+#region Test-Prerequisites
+
+# Ensuring the Script will be run on a supported Operating System
+$OS = Get-WmiObject -Class Win32_OperatingSystem
+If (($OS.name -notmatch "Server") -or ([int32]$OS.BuildNumber -lt 9200)) {
+    Write-Warning -Message "This Script must be run on Windows Server 2012 or newer! Aborting."
+    return 
+}
+
+#endregion Test-Prerequisites
+
+#region Detect-CaInstallation
+
+Try {
+    $ObjectName = (Get-ItemProperty `
+        -Path "HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration" `
+        -Name Active `
+        -ErrorAction Stop).Active
+}
+Catch {
+    # Nothing. We silently continue with the AD Dump.
+}
+
+# Exporting local Configuration Data if a CA is installed on this machine
+If ($ObjectName) {
+
+    Write-Host "Exporting local CA Configuration Data."
+
+    $CurrentDirectory = "$Path\Enrollment Services"
+    [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
+
+    Export-CaInformation `
+        -CaName $ObjectName `
+        -Path $CurrentDirectory
+
+}
+
+#endregion Detect-CaInstallation
+
+#region Prepare-ADDump
+
+Write-Host "Exporting Active Directory PKI Configuration Data."
+
+# Ensuring we have required AD PowerShell Modules installed
+If ((Get-WindowsFeature RSAT-AD-PowerShell).Installed -ne $True) {
+    Write-Warning -Message "Export of Active Directory Data requires AD PowerShell Modules (RSAT-AD-PowerShell) to be installed! Aborting."
+    Write-Warning -Message "If you only export local data from a CA, you may safely ignore this message."
+    return 
+}
 
 Import-Module ActiveDirectory
-If ($null -eq $DsConfigDn) {
+
+If ([String]::IsNullOrEmpty($DsConfigDn)) {
     $DsConfigDn = "CN=Configuration,$($(Get-ADForest | Select-Object -ExpandProperty RootDomain | Get-ADDomain).DistinguishedName)"
 }
 
+$PkiDn = "CN=Public Key Services,CN=Services,$DsConfigDn"
+
 [void](New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop)
 
-#endregion Preparations
+#region Prepare-ADDump
 
 #region Dump-AIA
 
 $CurrentDirectory = "$Path\AIA"
 [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
 
-Get-ChildItem "AD:CN=AIA,CN=Public Key Services,CN=Services,$DsConfigDn" | Foreach-Object -Process {
+Get-ChildItem -Path "AD:CN=AIA,$PkiDn" | Foreach-Object -Process {
 
     $ObjectName = $_.Name
     $ObjectDn = $_.DistinguishedName
     Write-Verbose -Message "Dumping $ObjectDn"
 
-    # Windows 2012/R2 do not seem to support specifying further Arguments
     certutil -v -ds $ObjectDn > "$CurrentDirectory\certificationAuthority_$($ObjectName).txt"
 
+    (Get-Acl "AD:$ObjectDn").access |
+        Out-File `
+                -FilePath "$CurrentDirectory\certificationAuthority_$($ObjectName)-access.txt" `
+                -Encoding String `
+                -Force
+
     $i = 0
-    $(Get-ADObject $_ -Properties cACertificate).cACertificate | Foreach-Object {
+    $(Get-ADObject $_ -Properties cACertificate).cACertificate | Foreach-Object -Process {
         $FileName = "$CurrentDirectory\$($ObjectName)_cACertificate_($($i))"
         # CRT Files are usually blocked by E-Mail Anti-Virus, thus only exporting in BASE64 Encoding to Text Files
         Set-Content `
@@ -124,7 +237,7 @@ Get-ChildItem "AD:CN=AIA,CN=Public Key Services,CN=Services,$DsConfigDn" | Forea
 
 #region Dump-CDP
 
-Get-ChildItem "AD:CN=CDP,CN=Public Key Services,CN=Services,$DsConfigDn" | Foreach-Object -Process {
+Get-ChildItem -Path "AD:CN=CDP,$PkiDn" | Foreach-Object -Process {
 
     $ObjectName = $_.Name
 
@@ -132,7 +245,7 @@ Get-ChildItem "AD:CN=CDP,CN=Public Key Services,CN=Services,$DsConfigDn" | Forea
     [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
 
     # Enumerate Sub Directories
-    Get-ChildItem "AD:$($_.DistinguishedName)" | Foreach-Object -Process {
+    Get-ChildItem -Path "AD:$($_.DistinguishedName)" | Foreach-Object -Process {
 
         $ObjectName = $_.Name
         $ObjectDn = $_.DistinguishedName
@@ -150,6 +263,8 @@ Get-ChildItem "AD:CN=CDP,CN=Public Key Services,CN=Services,$DsConfigDn" | Forea
                 -Path "$($FileName).crl" `
                 -Force `
                 -ErrorAction SilentlyContinue
+            # Dump disabled for now as this may affect Performance on larger CRLs
+            #certutil -dump "$($FileName).crl" > "$($FileName)-dump.txt"
         }
         
         $DeltaCrl = $(Get-ADObject $_ -Properties deltaRevocationList).deltaRevocationList
@@ -161,6 +276,8 @@ Get-ChildItem "AD:CN=CDP,CN=Public Key Services,CN=Services,$DsConfigDn" | Forea
                 -Path "$($FileName)+.crl" `
                 -Force `
                 -ErrorAction SilentlyContinue
+            # Dump disabled for now as this may affect Performance on larger CRLs
+            #certutil -dump "$($FileName)+.crl" > "$($FileName)+-dump.txt"
         }
 
     }
@@ -174,7 +291,7 @@ Get-ChildItem "AD:CN=CDP,CN=Public Key Services,CN=Services,$DsConfigDn" | Forea
 $CurrentDirectory = "$Path\Certificate Templates"
 [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
 
-Get-ChildItem "AD:CN=Certificate Templates,CN=Public Key Services,CN=Services,$DsConfigDn" | Foreach-Object -Process {
+Get-ChildItem -Path "AD:CN=Certificate Templates,$PkiDn" | Foreach-Object -Process {
 
     $ObjectName = $_.Name
     $ObjectDn = $_.DistinguishedName
@@ -192,17 +309,16 @@ Get-ChildItem "AD:CN=Certificate Templates,CN=Public Key Services,CN=Services,$D
 $CurrentDirectory = "$Path\Certification Authorities"
 [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
 
-Get-ChildItem "AD:CN=Certification Authorities,CN=Public Key Services,CN=Services,$DsConfigDn" | Foreach-Object -Process {
+Get-ChildItem -Path "AD:CN=Certification Authorities,$PkiDn" | Foreach-Object -Process {
 
     $ObjectName = $_.Name
     $ObjectDn = $_.DistinguishedName
     Write-Verbose -Message "Dumping $ObjectDn"
 
-    # Windows 2012/R2 do not seem to support specifying further Arguments
     certutil -v -ds $ObjectDn > "$CurrentDirectory\certificationAuthority_$($ObjectName).txt"
 
     $i = 0
-    $(Get-ADObject $_ -Properties cACertificate).cACertificate | Foreach-Object {
+    $(Get-ADObject $_ -Properties cACertificate).cACertificate | Foreach-Object -Process {
         $FileName = "$CurrentDirectory\$($ObjectName)_cACertificate_($($i))"
         # CRT Files are usually blocked by E-Mail Anti-Virus, thus only exporting in BASE64 Encoding to Text Files
         Set-Content `
@@ -223,54 +339,30 @@ Get-ChildItem "AD:CN=Certification Authorities,CN=Public Key Services,CN=Service
 $CurrentDirectory = "$Path\Enrollment Services"
 [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
 
-Get-ChildItem "AD:CN=Enrollment Services,CN=Public Key Services,CN=Services,$DsConfigDn" | Foreach-Object -Process {
+Get-ChildItem -Path "AD:CN=Enrollment Services,$PkiDn" | Foreach-Object -Process {
 
     $ObjectName = $_.Name
     $ObjectDn = $_.DistinguishedName
 
     Write-Verbose -Message "Dumping $ObjectDn"
 
-    # Windows 2012/R2 do not seem to support specifying further Arguments
     certutil -v -ds $ObjectDn > "$CurrentDirectory\pKIEnrollmentService_$($ObjectName).txt"
 
     $DnsHostName = $(Get-ADObject $_ -Properties dNSHostName).dNSHostName
 
     # Dumping which Certificate Templates are bound to each CA
     (Get-ADObject $_ -Properties certificateTemplates).certificateTemplates |
-        Out-File -FilePath "$CurrentDirectory\$($ObjectName)_CATemplates.txt" -Encoding String -Force
+        Out-File `
+            -FilePath "$CurrentDirectory\$($ObjectName)_CATemplates.txt" `
+            -Encoding String `
+            -Force
 
-    If ($DumpCA) {
+    If ($DumpCA.IsPresent) {
 
-        Write-Verbose -Message "Dumping Configuration from $ObjectName ($DnsHostName)"
-
-        # TestICertAdmin Connectivity First to speed up Process, throw Error on Fail
-        $CertAdmin = New-Object -ComObject CertificateAuthority.Admin.1
-
-        Try {
-            [void]($CertAdmin.GetCAProperty("$DnsHostName\$ObjectName",0x6,0,4,0))
-            $CaIsOnline = $True
-        }
-        Catch {
-            Write-Warning -Message "Cannot connect to $ObjectName ($DnsHostName)"
-            Write-Warning -Message "Configuration therefore not exported. Do this manually directly on the CA."
-            $CaIsOnline = $False
-        }
-
-        If ($CaIsOnline -eq $True) {
-
-            $Now = $((Get-Date).ToString($(Get-culture).DateTimeFormat.ShortDatePattern))
-            $DbFields = "RequestID,SerialNumber,RequesterName,CommonName,CertificateTemplate,NotBefore,NotAfter"
-
-            # Dumping CA Configuration
-            certutil -config "$DnsHostName\$ObjectName" -v -getreg CA > "$CurrentDirectory\$($ObjectName)_getreg_CA.txt"
-            certutil -config "$DnsHostName\$ObjectName" -v -getreg CA\CSP > "$CurrentDirectory\$($ObjectName)_getreg_CA_CSP.txt"
-            certutil -config "$DnsHostName\$ObjectName" -v -getreg Policy > "$CurrentDirectory\$($ObjectName)_getreg_Policy.txt"
-            certutil -config "$DnsHostName\$ObjectName" -v -cainfo > "$CurrentDirectory\$($ObjectName)_cainfo.txt"
-            certutil -config "$DnsHostName\$ObjectName" -view -restrict "Disposition=20,NotAfter>=$Now" -out $DbFields csv > "$CurrentDirectory\$($ObjectName)_ValidCertificates.csv"
-            certutil -config "$DnsHostName\$ObjectName" -view -restrict "Disposition=30" -out $DbFields csv > "$CurrentDirectory\$($ObjectName)_FailedRequests.csv"
-            certutil -config "$DnsHostName\$ObjectName" -view -restrict "Disposition=31" -out $DbFields csv > "$CurrentDirectory\$($ObjectName)_DeniedRequests.csv"
-
-        }
+        Export-CaInformation `
+            -HostName $DnsHostName `
+            -CaName $ObjectName `
+            -Path $CurrentDirectory
 
     }
 
@@ -283,7 +375,7 @@ Get-ChildItem "AD:CN=Enrollment Services,CN=Public Key Services,CN=Services,$DsC
 $CurrentDirectory = "$Path\KRA"
 [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
 
-Get-ChildItem "AD:CN=KRA,CN=Public Key Services,CN=Services,$DsConfigDn" | Foreach-Object -Process {
+Get-ChildItem -Path "AD:CN=KRA,$PkiDn" | Foreach-Object -Process {
 
     $ObjectName = $_.Name
     $ObjectDn = $_.DistinguishedName
@@ -301,7 +393,7 @@ Get-ChildItem "AD:CN=KRA,CN=Public Key Services,CN=Services,$DsConfigDn" | Forea
 $CurrentDirectory = "$Path\OID"
 [void](New-Item -ItemType Directory -Path $CurrentDirectory -Force -ErrorAction Continue)
 
-Get-ChildItem "AD:CN=OID,CN=Public Key Services,CN=Services,$DsConfigDn" | Foreach-Object -Process {
+Get-ChildItem -Path "AD:CN=OID,$PkiDn" | Foreach-Object -Process {
 
     $ObjectName = $_.Name
     $ObjectDn = $_.DistinguishedName
