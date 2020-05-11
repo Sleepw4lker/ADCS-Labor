@@ -103,6 +103,11 @@ begin {
             certutil -config "$HostName\$CaName" -view -restrict "Disposition=30" -out $DbFields csv > "$Path\Enrollment Services\$($CaName)_FailedRequests.csv"
             certutil -config "$HostName\$CaName" -view -restrict "Disposition=31" -out $DbFields csv > "$Path\Enrollment Services\$($CaName)_DeniedRequests.csv"
 
+            # Dumping and verifying the CA Exchange Certificate
+            certutil -config "$HostName\$CaName" -cainfo xchg > "$Path\Enrollment Services\$($CaName)_xchg_BASE64.txt"
+            certutil -dump "$Path\Enrollment Services\$($CaName)_xchg_BASE64.txt" > "$Path\Enrollment Services\$($CaName)_xchg_dump.txt"
+            certutil -verify -urlfetch "$Path\Enrollment Services\$($CaName)_xchg_BASE64.txt" > "$Path\Enrollment Services\$($CaName)_xchg_verify.txt"
+
             Copy-Item `
                 -Path "$($env:SystemRoot)\Enrollment Services\capolicy.inf" `
                 -Destination "$Path\Enrollment Services\$($CaName)_capolicy.inf" `
@@ -276,6 +281,7 @@ process {
                 -Path "$($FileName)_BASE64.txt" `
                 -Force
             certutil -dump "$($FileName)_BASE64.txt" > "$($FileName)_BASE64_dump.txt"
+            certutil -verify -urlfetch "$($FileName)_BASE64.txt" > "$($FileName)_BASE64_verify.txt"
             $i++
         }
 
@@ -373,6 +379,7 @@ process {
                 -Path "$($FileName)_BASE64.txt" `
                 -Force
             certutil -dump "$($FileName)_BASE64.txt" > "$($FileName)_BASE64_dump.txt"
+            certutil -verify -urlfetch "$($FileName)_BASE64.txt" > "$($FileName)_BASE64_verify.txt"
             $i++
         }
 
