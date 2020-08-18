@@ -109,7 +109,7 @@ begin {
             certutil -verify -urlfetch "$Path\Enrollment Services\$($CaName)_xchg_BASE64.txt" > "$Path\Enrollment Services\$($CaName)_xchg_verify.txt"
 
             Copy-Item `
-                -Path "$($env:SystemRoot)\Enrollment Services\capolicy.inf" `
+                -Path "$($env:SystemRoot)\capolicy.inf" `
                 -Destination "$Path\Enrollment Services\$($CaName)_capolicy.inf" `
                 -ErrorAction SilentlyContinue
 
@@ -117,19 +117,27 @@ begin {
 
                 # Exporting the Windows Event Log will in most cases work only locally
 
-                $Limit = (Get-Date).AddDays(-90)
-                $EventSources = "Microsoft-Windows-CertificationAuthority","ESENT"
+                # Ensuring the Script will be run with Elevation
+                If (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+                    Write-Warning -Message "Please run this again with Elevation (run as Administrator) to be able to export CA Logs."
+                }
+                Else {
 
-                Get-EventLog `
-                    -LogName Application `
-                    -Source $EventSources `
-                    -After $Limit `
-                    -ErrorAction SilentlyContinue | 
-                    Select-Object -Property EntryType, TimeGenerated, Source, EventID | 
-                        Export-CSV "$Path\Enrollment Services\$($CaName)_EventLog-Overview.csv" -NoTypeInfo
+                    $Limit = (Get-Date).AddDays(-90)
+                    $EventSources = "Microsoft-Windows-CertificationAuthority","ESENT"
 
-                [void](Get-WmiObject -Class Win32_NTEventlogFile | 
-                    Where-Object LogfileName -EQ 'Application').BackupEventlog("$Path\Enrollment Services\$($CaName)_EventLog.evtx")
+                    Get-EventLog `
+                        -LogName Application `
+                        -Source $EventSources `
+                        -After $Limit `
+                        -ErrorAction SilentlyContinue | 
+                        Select-Object -Property EntryType, TimeGenerated, Source, EventID | 
+                            Export-CSV "$Path\Enrollment Services\$($CaName)_EventLog-Overview.csv" -NoTypeInfo
+
+                    [void](Get-WmiObject -Class Win32_NTEventlogFile | 
+                        Where-Object LogfileName -EQ 'Application').BackupEventlog("$Path\Enrollment Services\$($CaName)_EventLog.evtx")
+
+                }
 
                 $UseDs = (Get-ItemProperty `
                     -Path "HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$ObjectName" `
