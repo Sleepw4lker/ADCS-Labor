@@ -93,35 +93,38 @@ begin {
                 return
             }
 
+            mkdir "$Path\Enrollment Services\$($CaName)"
+
             # Dumping CA Configuration
-            certutil -config "$HostName\$CaName" -v -getreg > "$Path\Enrollment Services\$($CaName)_getreg.txt"
-            certutil -config "$HostName\$CaName" -v -getreg CA > "$Path\Enrollment Services\$($CaName)_getreg_CA.txt"
-            certutil -config "$HostName\$CaName" -v -getreg CA\CSP > "$Path\Enrollment Services\$($CaName)_getreg_CA_CSP.txt"
-            certutil -config "$HostName\$CaName" -v -getreg Policy > "$Path\Enrollment Services\$($CaName)_getreg_Policy.txt"
-            certutil -config "$HostName\$CaName" -v -cainfo > "$Path\Enrollment Services\$($CaName)_cainfo.txt"
-            certutil -config "$HostName\$CaName" -view -restrict "Disposition=20,NotAfter>=$Now" -out $DbFields csv > "$Path\Enrollment Services\$($CaName)_ValidCertificates.csv"
-            certutil -config "$HostName\$CaName" -view -restrict "Disposition=30" -out $DbFields csv > "$Path\Enrollment Services\$($CaName)_FailedRequests.csv"
-            certutil -config "$HostName\$CaName" -view -restrict "Disposition=31" -out $DbFields csv > "$Path\Enrollment Services\$($CaName)_DeniedRequests.csv"
+            certutil -config "$HostName\$CaName" -v -getreg > "$Path\Enrollment Services\$($CaName)\$($CaName)_getreg.txt"
+            certutil -config "$HostName\$CaName" -v -getreg CA > "$Path\Enrollment Services\$($CaName)\$($CaName)_getreg_CA.txt"
+            certutil -config "$HostName\$CaName" -v -getreg CA\CSP > "$Path\Enrollment Services\$($CaName)\$($CaName)_getreg_CA_CSP.txt"
+            certutil -config "$HostName\$CaName" -v -getreg CA\EncryptionCSP > "$Path\Enrollment Services\$($CaName)\$($CaName)_getreg_CA_EncryptionCSP.txt"
+            certutil -config "$HostName\$CaName" -v -getreg Policy > "$Path\Enrollment Services\$($CaName)\$($CaName)_getreg_Policy.txt"
+            certutil -config "$HostName\$CaName" -v -cainfo > "$Path\Enrollment Services\$($CaName)\$($CaName)_cainfo.txt"
+            certutil -config "$HostName\$CaName" -view -restrict "Disposition=20,NotAfter>=$Now" -out $DbFields csv > "$Path\Enrollment Services\$($CaName)\$($CaName)_ValidCertificates.csv"
+            certutil -config "$HostName\$CaName" -view -restrict "Disposition=30" -out $DbFields csv > "$Path\Enrollment Services\$($CaName)\$($CaName)_FailedRequests.csv"
+            certutil -config "$HostName\$CaName" -view -restrict "Disposition=31" -out $DbFields csv > "$Path\Enrollment Services\$($CaName)\$($CaName)_DeniedRequests.csv"
 
             # Dumping and verifying the CA Exchange Certificate
-            certutil -config "$HostName\$CaName" -cainfo xchg > "$Path\Enrollment Services\$($CaName)_xchg_BASE64.txt"
-            certutil -dump "$Path\Enrollment Services\$($CaName)_xchg_BASE64.txt" > "$Path\Enrollment Services\$($CaName)_xchg_dump.txt"
-            certutil -verify -urlfetch "$Path\Enrollment Services\$($CaName)_xchg_BASE64.txt" > "$Path\Enrollment Services\$($CaName)_xchg_verify.txt"
+            certutil -config "$HostName\$CaName" -cainfo xchg > "$Path\Enrollment Services\$($CaName)\$($CaName)_xchg_BASE64.txt"
+            certutil -dump "$Path\Enrollment Services\$($CaName)\$($CaName)_xchg_BASE64.txt" > "$Path\Enrollment Services\$($CaName)\$($CaName)_xchg_dump.txt"
+            certutil -verify -urlfetch "$Path\Enrollment Services\$($CaName)\$($CaName)_xchg_BASE64.txt" > "$Path\Enrollment Services\$($CaName)\$($CaName)_xchg_verify.txt"
 
             Copy-Item `
                 -Path "$($env:SystemRoot)\capolicy.inf" `
-                -Destination "$Path\Enrollment Services\$($CaName)_capolicy.inf" `
+                -Destination "$Path\Enrollment Services\$($CaName)\$($CaName)_capolicy.inf" `
                 -ErrorAction SilentlyContinue
 
             If ($HostName -eq "localhost") {
-
-                # Exporting the Windows Event Log will in most cases work only locally
 
                 # Ensuring the Script will be run with Elevation
                 If (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
                     Write-Warning -Message "Please run this again with Elevation (run as Administrator) to be able to export CA Logs."
                 }
                 Else {
+
+                    # Exporting the Windows Event Log will in most cases work only locally
 
                     $Limit = (Get-Date).AddDays(-90)
                     $EventSources = "Microsoft-Windows-CertificationAuthority","ESENT"
@@ -132,10 +135,17 @@ begin {
                         -After $Limit `
                         -ErrorAction SilentlyContinue | 
                         Select-Object -Property EntryType, TimeGenerated, Source, EventID | 
-                            Export-CSV "$Path\Enrollment Services\$($CaName)_EventLog-Overview.csv" -NoTypeInfo
+                            Export-CSV "$Path\Enrollment Services\$($CaName)\$($CaName)_EventLog-Overview.csv" -NoTypeInfo
 
                     [void](Get-WmiObject -Class Win32_NTEventlogFile | 
-                        Where-Object LogfileName -EQ 'Application').BackupEventlog("$Path\Enrollment Services\$($CaName)_EventLog.evtx")
+                        Where-Object LogfileName -EQ 'Application').BackupEventlog("$Path\Enrollment Services\$($CaName)\$($CaName)_EventLog.evtx")
+
+                    # Exporting local Firewall Rules
+                    Get-NetFirewallRule | Export-Csv -Path "$Path\Enrollment Services\$($CaName)\$($CaName)_FirewallRules.csv" -Encoding UTF8
+
+                    # Exporting local System Info
+                    ipconfig /all > "$Path\Enrollment Services\$($CaName)\$($CaName)_ipconfig.txt"
+                    msinfo32 /report "$Path\Enrollment Services\$($CaName)\$($CaName)_msinfo32.txt"
 
                 }
 
@@ -149,7 +159,7 @@ begin {
                     Get-CATemplate | Foreach-Object {
                         $_.Name
                     } | Out-File `
-                        -FilePath "$Path\Enrollment Services\$($CaName)_CATemplates.txt" `
+                        -FilePath "$Path\Enrollment Services\$($CaName)\$($CaName)_CATemplates.txt" `
                         -Encoding String `
                         -Force
 
@@ -249,7 +259,7 @@ process {
     $PkiDn = "CN=Public Key Services,CN=Services,$DsConfigDn"
 
 
-    "AIA","CDP","Enrollment Services","Certification Authorities","Certificate Templates","KRA","OID" | ForEach-Object -Process {
+    "AIA","CDP","Enrollment Services","Certification Authorities","Certificate Templates","KRA","OID","NTAuthCertificates" | ForEach-Object -Process {
 
         [void](New-Item `
             -ItemType Directory `
@@ -463,6 +473,23 @@ process {
     }
 
     #endregion Dump-OID
+
+    # region Dump-NTAuthCertificates
+
+    $CurrentDirectory = "$Path\NTAuthCertificates"
+
+    $(Get-ADObject "CN=NTAuthCertificates,$PkiDn" -Properties cACertificate).cACertificate | Foreach-Object -Process {
+        $FileName = "$CurrentDirectory\NTAuthCertificates\cACertificate_($($i))"
+        # CRT Files are usually blocked by E-Mail Anti-Virus, thus only exporting in BASE64 Encoding to Text Files
+        Set-Content `
+            -Value "-----BEGIN CERTIFICATE-----`n$([Convert]::ToBase64String($_))`n-----END CERTIFICATE-----" `
+            -Encoding UTF8 `
+            -Path "$($FileName)_BASE64.txt" `
+            -Force
+        certutil -dump "$($FileName)_BASE64.txt" > "$($FileName)_BASE64_dump.txt"
+        certutil -verify -urlfetch "$($FileName)_BASE64.txt" > "$($FileName)_BASE64_verify.txt"
+        $i++
+    }
 
 } 
 
