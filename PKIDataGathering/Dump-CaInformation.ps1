@@ -146,6 +146,7 @@ begin {
                     # Exporting local System Info
                     ipconfig /all > "$Path\Enrollment Services\$($CaName)\$($CaName)_ipconfig.txt"
                     msinfo32 /report "$Path\Enrollment Services\$($CaName)\$($CaName)_msinfo32.txt"
+                    auditpol /get /category:* > "$Path\Enrollment Services\$($CaName)\$($CaName)_auditpol.txt"
 
                 }
 
