@@ -147,6 +147,8 @@ begin {
                     ipconfig /all > "$Path\Enrollment Services\$($CaName)\$($CaName)_ipconfig.txt"
                     msinfo32 /report "$Path\Enrollment Services\$($CaName)\$($CaName)_msinfo32.txt"
                     auditpol /get /category:* > "$Path\Enrollment Services\$($CaName)\$($CaName)_auditpol.txt"
+                    gpresult /scope:Computer /H "$Path\Enrollment Services\$($CaName)\$($CaName)_gpresult_computer.html"
+                    gpresult /scope:User /H "$Path\Enrollment Services\$($CaName)\$($CaName)_gpresult_user.html"
 
                 }
 
