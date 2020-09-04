@@ -93,7 +93,11 @@ begin {
                 return
             }
 
-            mkdir "$Path\Enrollment Services\$($CaName)"
+            [void](New-Item `
+                -ItemType Directory `
+                -Path "$Path\Enrollment Services\$($CaName)" `
+                -Force `
+                -ErrorAction Continue)
 
             # Dumping CA Configuration
             certutil -config "$HostName\$CaName" -v -getreg > "$Path\Enrollment Services\$($CaName)\$($CaName)_getreg.txt"
@@ -102,9 +106,9 @@ begin {
             certutil -config "$HostName\$CaName" -v -getreg CA\EncryptionCSP > "$Path\Enrollment Services\$($CaName)\$($CaName)_getreg_CA_EncryptionCSP.txt"
             certutil -config "$HostName\$CaName" -v -getreg Policy > "$Path\Enrollment Services\$($CaName)\$($CaName)_getreg_Policy.txt"
             certutil -config "$HostName\$CaName" -v -cainfo > "$Path\Enrollment Services\$($CaName)\$($CaName)_cainfo.txt"
-            certutil -config "$HostName\$CaName" -view -restrict "Disposition=20,NotAfter>=$Now" -out $DbFields csv > "$Path\Enrollment Services\$($CaName)\$($CaName)_ValidCertificates.csv"
-            certutil -config "$HostName\$CaName" -view -restrict "Disposition=30" -out $DbFields csv > "$Path\Enrollment Services\$($CaName)\$($CaName)_FailedRequests.csv"
-            certutil -config "$HostName\$CaName" -view -restrict "Disposition=31" -out $DbFields csv > "$Path\Enrollment Services\$($CaName)\$($CaName)_DeniedRequests.csv"
+            certutil -config "$HostName\$CaName" -view -restrict "Disposition=20,NotAfter>=$Now" -out $DbFields csv > "$Path\Enrollment Services\$($CaName)\$($CaName)_Certs_Valid.csv"
+            certutil -config "$HostName\$CaName" -view -restrict "Disposition=30" -out $DbFields csv > "$Path\Enrollment Services\$($CaName)\$($CaName)_Certs_Failed.csv"
+            certutil -config "$HostName\$CaName" -view -restrict "Disposition=31" -out $DbFields csv > "$Path\Enrollment Services\$($CaName)\$($CaName)_Certs_Denied.csv"
 
             # Dumping and verifying the CA Exchange Certificate
             certutil -config "$HostName\$CaName" -cainfo xchg > "$Path\Enrollment Services\$($CaName)\$($CaName)_xchg_BASE64.txt"
@@ -137,18 +141,32 @@ begin {
                         Select-Object -Property EntryType, TimeGenerated, Source, EventID | 
                             Export-CSV "$Path\Enrollment Services\$($CaName)\$($CaName)_EventLog-Overview.csv" -NoTypeInfo
 
-                    [void](Get-WmiObject -Class Win32_NTEventlogFile | 
-                        Where-Object LogfileName -EQ 'Application').BackupEventlog("$Path\Enrollment Services\$($CaName)\$($CaName)_EventLog.evtx")
+                    "Application","Security","System" | ForEach-Object -Process {
+                        [void](Get-WmiObject -Class Win32_NTEventlogFile | Where-Object LogfileName -EQ $_).BackupEventlog(
+                            "$Path\Enrollment Services\$($CaName)\$($CaName)_Log_$($_).evtx"
+                            )
+                    }
 
                     # Exporting local Firewall Rules
-                    Get-NetFirewallRule | Export-Csv -Path "$Path\Enrollment Services\$($CaName)\$($CaName)_FirewallRules.csv" -Encoding UTF8
+                    Get-NetFirewallRule | Export-Csv -Path "$Path\Enrollment Services\$($CaName)\$($CaName)_FirewallRules.csv" -Encoding UTF8 -Delimiter ";"
 
                     # Exporting local System Info
                     ipconfig /all > "$Path\Enrollment Services\$($CaName)\$($CaName)_ipconfig.txt"
                     msinfo32 /report "$Path\Enrollment Services\$($CaName)\$($CaName)_msinfo32.txt"
                     auditpol /get /category:* > "$Path\Enrollment Services\$($CaName)\$($CaName)_auditpol.txt"
-                    gpresult /scope:Computer /H "$Path\Enrollment Services\$($CaName)\$($CaName)_gpresult_computer.html"
-                    gpresult /scope:User /H "$Path\Enrollment Services\$($CaName)\$($CaName)_gpresult_user.html"
+
+                    "Computer","User" | ForEach-Object -Process {
+
+                        # Avoiding ERROR: Value for 'xyz.html' option cannot be more than 127 character(s).
+                        $TempFile = "$($env:TEMP)\$(Get-Random).html"
+                        gpresult /scope:$($_) /H $TempFile
+                        Copy-Item `
+                            -Path $TempFile `
+                            -Destination "$Path\Enrollment Services\$($CaName)\$($CaName)_gpresult_$($_).html"
+                        Remove-Item $TempFile
+
+                    }
+
 
                 }
 
