@@ -64,7 +64,7 @@ If (-not (Test-Path $WorkFolder)) {
 }
 
 # Identify all Certificates that have archived private Keys associated
-$Header = "RequestId,RequesterName,SerialNumber,NotBefore,NotAfter,KeyRecoveryHashes"
+$Header = "RequestId","RequesterName","SerialNumber","NotBefore","NotAfter","KeyRecoveryHashes"
 
 # Converting the Array to a Comma separated List, for certutil
 For ($i = 0; $i -lt $Header.Count; $i++) {
