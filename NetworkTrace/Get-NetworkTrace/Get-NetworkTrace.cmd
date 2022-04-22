@@ -11,11 +11,7 @@ set mytimestamp=%mydate: =_%_%mytime:.=_%
 
 set ETL=%USERPROFILE%\Desktop\networktrace_%mytimestamp%.etl
 
-netsh ^
-    trace start ^
-    persistent=yes ^
-    capture=yes ^
-    tracefile=%ETL%
+netsh trace start persistent=yes capture=yes tracefile=%COMPUTERNAME%.etl
 
 echo Reproduce the Issue, then press any key to stop the Packet Capture!
 pause

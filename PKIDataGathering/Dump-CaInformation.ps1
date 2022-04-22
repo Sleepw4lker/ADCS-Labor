@@ -500,7 +500,7 @@ process {
     $CurrentDirectory = "$Path\NTAuthCertificates"
 
     $(Get-ADObject "CN=NTAuthCertificates,$PkiDn" -Properties cACertificate).cACertificate | Foreach-Object -Process {
-        $FileName = "$CurrentDirectory\NTAuthCertificates\cACertificate_($($i))"
+        $FileName = "$CurrentDirectory\cACertificate_($($i))"
         # CRT Files are usually blocked by E-Mail Anti-Virus, thus only exporting in BASE64 Encoding to Text Files
         Set-Content `
             -Value "-----BEGIN CERTIFICATE-----`n$([Convert]::ToBase64String($_))`n-----END CERTIFICATE-----" `
