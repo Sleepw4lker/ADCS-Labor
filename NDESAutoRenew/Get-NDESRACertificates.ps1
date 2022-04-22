@@ -14,7 +14,16 @@ param(
     [Parameter(Mandatory=$True)]
     [ValidateRange(1,3650)]
     [Int]
-    $Days = 90
+    $Days = 90,
+
+    [Alias("CryptographicServiceProvider")]
+    [Parameter(Mandatory=$False)]
+    [ValidateScript({
+        $Csp = $_
+        [bool](Get-KeyStorageProvider | Where-Object { $_.Name -eq $Csp }).LegacyCsp
+    })]
+    [String]
+    $Csp = "Microsoft Strong Cryptographic Provider"
 )
 
 begin {
@@ -121,12 +130,12 @@ process {
     [PSCustomObject]@{
         Name = $EnrollmentAgentTemplate
         KeyUsage = "DigitalSignature"
-        Csp = "Microsoft Strong Cryptographic Provider"
+        Csp = $Csp
     },
     [PSCustomObject]@{
         Name = $CepEncryptionTemplate
         KeyUsage = "KeyEncipherment"
-        Csp = "Microsoft Strong Cryptographic Provider"
+        Csp = $Csp
     } | 
     ForEach-Object -Process {
 
