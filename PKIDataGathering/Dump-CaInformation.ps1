@@ -140,8 +140,9 @@ begin {
                     $EventSources = "Microsoft-Windows-CertificationAuthority","ESENT"
 
                     Get-EventLog -LogName Application -Source $EventSources -After $Limit -ErrorAction SilentlyContinue | 
-                        Select-Object -Property EntryType, TimeGenerated, Source, EventID | 
-                            Export-CSV "$Path\Enrollment Services\$($CaName)\$($CaName)_EventLog-Overview.csv" -NoTypeInfo
+                        Sort-Object -Property TimeGenerated -Descending |
+                            Select-Object -Property EntryType, TimeGenerated, Source, EventID, Message | 
+                                Export-CSV "$Path\Enrollment Services\$($CaName)\$($CaName)_EventLog-Overview.csv" -Delimiter ";" -NoTypeInfo
 
                     "Application","Security","System" | ForEach-Object -Process {
                         [void](Get-WmiObject -Class Win32_NTEventlogFile | Where-Object LogfileName -EQ $_).BackupEventlog(
