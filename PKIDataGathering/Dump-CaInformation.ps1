@@ -181,7 +181,7 @@ begin {
                         -Force
 
                     Get-CATemplate | Foreach-Object {
-                        certutil -v -template $_.Name > "$Path\Certificate Templates\pKICertificateTemplate_$(Remove-InvalidFileNameChars -Name $($_.Name)).txt"
+                        certutil -policyserver ldap: -v -template $_.Name > "$Path\Certificate Templates\pKICertificateTemplate_$(Remove-InvalidFileNameChars -Name $($_.Name)).txt"
                     }
                 }
             }
@@ -364,7 +364,7 @@ process {
 
         Write-Verbose -Message "Dumping $ObjectDn"
 
-        certutil -v -template $ObjectName > "$CurrentDirectory\pKICertificateTemplate_$(Remove-InvalidFileNameChars -Name $($ObjectName)).txt"
+        certutil -policyserver ldap: -v -template $ObjectName > "$CurrentDirectory\pKICertificateTemplate_$(Remove-InvalidFileNameChars -Name $($ObjectName)).txt"
     }
 
     # region Dump-CertificateTemplates
